@@ -20,6 +20,7 @@ import (
 var (
 	flagSrcDir         = flag.String("src", "", "source directory")
 	flagDestDir        = flag.String("dest", "", "dest directory")
+	flagInclude        = flag.String("include", "", "file name inclusion")
 	flagExclude        = flag.String("exclude", "", "file name exclusion")
 	flagCleanupErrors  = flag.Bool("cleanup", false, "clean up dest files when hashes don't match")
 	flagWorkers        = flag.Int("workers", 3, "number of workers")
@@ -27,6 +28,9 @@ var (
 	flagUpdate         = flag.Duration("update", 1*time.Second, "update period")
 	flagAddRandomDelay = flag.Bool("add-delay", true, "add random delay if dry run")
 	flagOverwrite      = flag.Bool("overwrite", false, "overwrite files if they exist")
+	flagJpg            = flag.Bool("jpg", false, "sync .JPG files")
+	flagRaw            = flag.Bool("raw", false, "sync .RAF files")
+	flagBoth           = flag.Bool("both", false, "sync both JPG and RAW files")
 	flagDryRun         = flag.Bool("dry-run", false, "dry run mode")
 )
 
@@ -34,18 +38,38 @@ const (
 	destDateFormat = "2006/01"
 )
 
+func exists(f string) bool {
+	_, err := os.Stat(f)
+	return !os.IsNotExist(err)
+}
+
+const skip = true
+
 func skipFile(d fs.DirEntry) bool {
 	if d.IsDir() {
-		return true
-	}
-	if !strings.HasSuffix(strings.ToUpper(d.Name()), ".JPG") {
-		return true
-	}
-	if strings.Contains(d.Name(), *flagExclude) {
-		return true
+		return skip
 	}
 
-	return false
+	var matchSuffix bool
+	un := strings.ToUpper(d.Name())
+	if *flagBoth || (*flagJpg && strings.HasSuffix(un, ".JPG")) {
+		matchSuffix = true
+	}
+	if *flagBoth || (*flagRaw && strings.HasSuffix(un, ".RAF")) {
+		matchSuffix = true
+	}
+	if !matchSuffix {
+		return skip
+	}
+
+	if *flagExclude != "" && strings.Contains(d.Name(), *flagExclude) {
+		return skip
+	}
+	if *flagInclude != "" && !strings.Contains(d.Name(), *flagInclude) {
+		return skip
+	}
+
+	return !skip
 }
 
 func hash(file io.ReadSeeker) (string, int64, error) {
@@ -90,10 +114,11 @@ func extractDate(fp string) (time.Time, string, int64, error) {
 }
 
 type Entry struct {
-	Src   string
-	Dest  string
-	Hash  string
-	Bytes int64
+	Src       string
+	Dest      string
+	Hash      string
+	Bytes     int64
+	Timestamp time.Time
 }
 
 func replOne(e Entry) (int64, error) {
@@ -108,10 +133,8 @@ func replOne(e Entry) (int64, error) {
 		return 0, err
 	}
 
-	if _, err := os.Stat(e.Dest); !os.IsNotExist(err) {
-		if !*flagOverwrite {
-			return 0, fmt.Errorf("path exists and overwrite is not set: %s", e.Dest)
-		}
+	if exists(e.Dest) && !*flagOverwrite {
+		return 0, fmt.Errorf("path exists and overwrite is not set: %s", e.Dest)
 	}
 
 	// copy the file
@@ -119,11 +142,13 @@ func replOne(e Entry) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to create %s: %v", e.Dest, err)
 	}
+	defer dst.Close()
 
 	src, err := os.Open(e.Src)
 	if err != nil {
 		return 0, fmt.Errorf("failed to open src %s: %v", e.Src, err)
 	}
+	defer src.Close()
 
 	n, err := io.Copy(dst, src)
 	if err != nil {
@@ -149,6 +174,10 @@ func replOne(e Entry) (int64, error) {
 		return 0, fmt.Errorf("failed to match hash after copy %s [%s] -> %s [%s]", e.Src, e.Hash, e.Dest, hs)
 	}
 
+	if err := os.Chtimes(e.Dest, e.Timestamp, e.Timestamp); err != nil {
+		return 0, fmt.Errorf("failed to set times on file: %s: %v", e.Dest, err)
+	}
+
 	return n, nil
 }
 
@@ -158,10 +187,8 @@ func status(m []Entry, res chan result) {
 		err    int
 		total  int64
 		copied int64
-		fps    int
-		bps    int64
-		ld     int
-		lc     int64
+		fps    float64
+		bps    float64
 	)
 
 	for _, e := range m {
@@ -170,17 +197,19 @@ func status(m []Entry, res chan result) {
 
 	log.Printf("replicating %d files, %dMB", len(m), total/1024/1024)
 
+	lm := len(m)
+	start := time.Now()
 	tt := time.Tick(*flagTick)
 	ut := time.Tick(*flagUpdate)
+
 	for {
 		select {
 		case <-tt:
-			log.Printf("completed %.1f%% (errors %d) %d / %d, %dMB / %dMB (%d/s, %dMB/s)", 100*(float32(done)/float32(len(m))), err, done, len(m), copied/1024/1024, total/1024/1024, fps, bps)
+			log.Printf("completed %.1f%% (errors %d) %d / %d, %dMB / %dMB (%.2f/s, %.2fMB/s)", 100*(float32(done)/float32(lm)), err, done, lm, copied/1024/1024, total/1024/1024, fps, bps)
 		case <-ut:
-			fps = done - ld
-			bps = (copied - lc) / 1024 / 1024
-			ld = done
-			lc = copied
+			inc := time.Since(start).Seconds()
+			fps = float64(done) / inc
+			bps = (float64(copied) / inc) / 1024 / 1024
 		case r := <-res:
 			// accumulate
 			done++
@@ -243,7 +272,10 @@ func maybeMkdirs(d string) error {
 }
 
 func main() {
-	var manifest []Entry
+	var (
+		files    []string
+		manifest []Entry
+	)
 
 	flag.Parse()
 
@@ -264,27 +296,40 @@ func main() {
 	src := os.DirFS(p)
 
 	if err := fs.WalkDir(src, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
 		if skipFile(d) {
 			return nil
 		}
 
-		fp := filepath.Join(p, path)
-
-		log.Printf("extracting %s", fp)
-		tm, hs, n, err := extractDate(fp)
-
-		dp := filepath.Join(*flagDestDir, tm.Format(destDateFormat), d.Name())
-
-		manifest = append(manifest, Entry{
-			Src:   fp,
-			Dest:  dp,
-			Hash:  hs,
-			Bytes: n,
-		})
+		files = append(files, filepath.Join(p, path))
 
 		return nil
 	}); err != nil {
 		log.Fatalf("failed to walk dir: %v", err)
+	}
+
+	for i, fp := range files {
+		log.Printf("extracting %d/%d: %s", i+1, len(files), fp)
+		tm, hs, n, err := extractDate(fp)
+		if err != nil {
+			log.Fatalf("failed to extract %s: %v", fp, err)
+		}
+
+		dp := filepath.Join(*flagDestDir, tm.Format(destDateFormat), filepath.Base(fp))
+		if exists(dp) && !*flagOverwrite {
+			continue
+		}
+
+		manifest = append(manifest, Entry{
+			Src:       fp,
+			Dest:      dp,
+			Hash:      hs,
+			Bytes:     n,
+			Timestamp: tm,
+		})
 	}
 
 	if err := replicate(manifest); err != nil {
