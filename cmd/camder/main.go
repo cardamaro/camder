@@ -318,7 +318,12 @@ func main() {
 			log.Fatalf("failed to extract %s: %v", fp, err)
 		}
 
-		dp := filepath.Join(*flagDestDir, tm.Format(destDateFormat), filepath.Base(fp))
+		ext := "jpg"
+		if strings.ToUpper(filepath.Ext(fp)) == ".RAF" {
+			ext = "raw"
+		}
+
+		dp := filepath.Join(*flagDestDir, tm.Format(destDateFormat), ext, filepath.Base(fp))
 		if exists(dp) && !*flagOverwrite {
 			continue
 		}
