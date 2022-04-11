@@ -32,6 +32,7 @@ var (
 	flagRaw            = flag.Bool("raw", false, "sync .RAF files")
 	flagBoth           = flag.Bool("both", false, "sync both JPG and RAW files")
 	flagDryRun         = flag.Bool("dry-run", false, "dry run mode")
+	flagVerbose        = flag.Bool("verbose", false, "verbose mode")
 )
 
 const (
@@ -301,6 +302,9 @@ func main() {
 		}
 
 		if skipFile(d) {
+			if *flagVerbose {
+				log.Printf("skipping %s...", d)
+			}
 			return nil
 		}
 
