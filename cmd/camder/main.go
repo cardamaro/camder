@@ -60,6 +60,9 @@ func skipFile(d fs.DirEntry) bool {
 		matchSuffix = true
 	}
 	if !matchSuffix {
+		if *flagVerbose {
+			log.Printf("  skipping %q due to no suffix", un)
+		}
 		return skip
 	}
 
@@ -303,7 +306,7 @@ func main() {
 
 		if skipFile(d) {
 			if *flagVerbose {
-				log.Printf("skipping %s...", d)
+				log.Printf("skipping %s...", filepath.Join(p, path))
 			}
 			return nil
 		}
